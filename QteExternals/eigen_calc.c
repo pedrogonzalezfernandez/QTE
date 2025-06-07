@@ -1,1 +1,244 @@
-/*     qte.eigencalc.c – Complex Eigen-decomposition for Max/MSP     (Computes eigenvalues & eigenvectors of a complex Hermitian matrix using LAPACK)         The external:       - Is instantiated with a dimension [qte.eigencalc n].       - Expects a plain list message of 2*n*n floats (row-major order; each element is represented as real, imag).       - On bang, converts the matrix to column-major, computes eigenvalues/eigenvectors,         and outputs:           Left outlet: n real eigenvalues.           Right outlet: 2*n*n floats for eigenvectors (each eigenvector is a column with interleaved real, imag).*/#include "ext.h"#include "ext_obex.h"// Include both clapack.h for LAPACK function declarations#include <Accelerate/Accelerate.h>#include <math.h>#include <stdlib.h>// Object structuretypedef struct _qte_eigencalc {    t_object ob;    long n;   // Matrix dimension    // Stored complex matrix, in row-major order.    // Expected input is 2*n*n floats, interpreted as n*n complex numbers.    __CLPK_doublecomplex *matrix;    // Two outlets: left for eigenvalues, right for eigenvectors.    void *out_eigenvalues;    void *out_eigenvectors;} t_qte_eigencalc;static t_class *qte_eigencalc_class = NULL;/* Function prototypes */void ext_main(void *r);void *qte_eigencalc_new(t_symbol *s, long argc, t_atom *argv);void  qte_eigencalc_free(t_qte_eigencalc *x);void  qte_eigencalc_assist(t_qte_eigencalc *x, void *b, long m, long a, char *s);void  qte_eigencalc_list(t_qte_eigencalc *x, t_symbol *s, long argc, t_atom *argv);void  qte_eigencalc_bang(t_qte_eigencalc *x);/* ----------------------------------------------------------------------------   ext_main – class initialization---------------------------------------------------------------------------- */void ext_main(void *r) {    t_class *c = class_new("qte.eigencalc",                           (method)qte_eigencalc_new,                           (method)qte_eigencalc_free,                           sizeof(t_qte_eigencalc),                           0L, A_GIMME, 0);                                class_addmethod(c, (method)qte_eigencalc_assist, "assist", A_CANT, 0);    // Register the "list" method to accept a plain list message with 2*n*n floats.    class_addmethod(c, (method)qte_eigencalc_list, "list", A_GIMME, 0);    // "bang" triggers the eigen-decomposition.    class_addmethod(c, (method)qte_eigencalc_bang, "bang", 0);        class_register(CLASS_BOX, c);    qte_eigencalc_class = c;}/* ----------------------------------------------------------------------------   Constructor---------------------------------------------------------------------------- */void *qte_eigencalc_new(t_symbol *s, long argc, t_atom *argv) {    t_qte_eigencalc *x = (t_qte_eigencalc *)object_alloc(qte_eigencalc_class);    if (x) {        // Default dimension is 3.        x->n = 3;        if (argc >= 1) {            long tmp = atom_getlong(argv);            if (tmp > 0)                x->n = tmp;        }        x->matrix = NULL;        // Create two outlets: left for eigenvalues, right for eigenvectors.        x->out_eigenvalues = outlet_new((t_object *)x, NULL);        x->out_eigenvectors = outlet_new((t_object *)x, NULL);    }    return (x);}/* ----------------------------------------------------------------------------   Destructor---------------------------------------------------------------------------- */void qte_eigencalc_free(t_qte_eigencalc *x) {    if (x->matrix)        free(x->matrix);}/* ----------------------------------------------------------------------------   Assist method---------------------------------------------------------------------------- */void qte_eigencalc_assist(t_qte_eigencalc *x, void *b, long m, long a, char *s) {    if (m == 1)        sprintf(s, "Input: list of %ld floats (2*n*n, row-major complex matrix), then bang", 2 * x->n * x->n);    else {        if (a == 0)            sprintf(s, "Left outlet: %ld eigenvalues (real)", x->n);        else            sprintf(s, "Right outlet: %ld eigenvectors (column-major, each as (real, imag) pair)", x->n * x->n);    }}/* ----------------------------------------------------------------------------   qte_eigencalc_list – stores the input complex matrix from a list message.   Expects 2*n*n floats (row-major order; each pair = real, imag).---------------------------------------------------------------------------- */void qte_eigencalc_list(t_qte_eigencalc *x, t_symbol *s, long argc, t_atom *argv) {    long n = x->n;    long total = 2 * n * n;    if (argc != total) {        object_error((t_object *)x, "Expected %ld floats for complex matrix, got %ld", total, argc);        return;    }    if (x->matrix)        free(x->matrix);    x->matrix = (__CLPK_doublecomplex *)malloc(n * n * sizeof(__CLPK_doublecomplex));    if (!x->matrix) {        object_error((t_object *)x, "Memory allocation failed for matrix storage.");        return;    }    for (long i = 0; i < n * n; i++) {        double re = atom_getfloat(argv + (2 * i));        double im = atom_getfloat(argv + (2 * i + 1));        __CLPK_doublecomplex z;        z.r = re;        z.i = im;        x->matrix[i] = z;    }    object_post((t_object *)x, "Complex matrix stored (dimension %ld).", n);}/* ----------------------------------------------------------------------------   qte_eigencalc_bang – performs the eigen-decomposition using LAPACK---------------------------------------------------------------------------- */void qte_eigencalc_bang(t_qte_eigencalc *x) {    if (!x->matrix) {        object_error((t_object *)x, "No matrix stored. Use a list message first.");        return;    }    long n = x->n;    __CLPK_integer N = (__CLPK_integer)n;    __CLPK_integer total = N * N;        // Convert the stored row-major matrix to column-major order (for LAPACK).    __CLPK_doublecomplex *A = (__CLPK_doublecomplex *)malloc(total * sizeof(__CLPK_doublecomplex));    if (!A) {        object_error((t_object *)x, "Memory allocation failed for LAPACK matrix.");        return;    }    for (long i = 0; i < n; i++) {        for (long j = 0; j < n; j++) {            // Row-major index: i*n + j, column-major index: j*n + i.            A[j*n + i] = x->matrix[i*n + j];        }    }        // Allocate eigenvalue array    __CLPK_doublereal *w = (__CLPK_doublereal *)malloc(n * sizeof(__CLPK_doublereal));    if (!w) {        object_error((t_object *)x, "Memory allocation failed for eigenvalues.");        free(A);        return;    }        // Set up parameters for zheev_ (using original LAPACK naming with underscore)    char jobz = 'V'; // compute eigenvectors    char uplo = 'U'; // matrix is stored in the upper triangle    __CLPK_integer LDA = N, info;        // Workspace query to determine optimal lwork size    __CLPK_integer lwork = -1;    __CLPK_doublecomplex work_query;    __CLPK_integer rwork_dim = 3*N - 2;    __CLPK_doublereal *rwork = (__CLPK_doublereal *)malloc(rwork_dim * sizeof(__CLPK_doublereal));    if (!rwork) {        object_error((t_object *)x, "Memory allocation failed for rwork.");        free(A); free(w);        return;    }        // Use the function with trailing underscore - this is the actual function name in Apple's implementation    #pragma clang diagnostic push    #pragma clang diagnostic ignored "-Wdeprecated-declarations"    zheev_(&jobz, &uplo, &N, A, &LDA, w, &work_query, &lwork, rwork, &info);    #pragma clang diagnostic pop        if (info != 0) {        object_error((t_object *)x, "zheev_ workspace query error: info=%d", info);        free(A); free(w); free(rwork);        return;    }    lwork = (__CLPK_integer)(work_query.r);    __CLPK_doublecomplex *work = (__CLPK_doublecomplex *)malloc(lwork * sizeof(__CLPK_doublecomplex));    if (!work) {        object_error((t_object *)x, "Memory allocation failed for work.");        free(A); free(w); free(rwork);        return;    }        // Actual eigen-decomposition call using the LAPACK function with underscore    #pragma clang diagnostic push    #pragma clang diagnostic ignored "-Wdeprecated-declarations"    zheev_(&jobz, &uplo, &N, A, &LDA, w, work, &lwork, rwork, &info);    #pragma clang diagnostic pop        free(work);    free(rwork);    if (info != 0) {        object_error((t_object *)x, "Eigen-decomposition failed: info=%d", info);        free(A); free(w);        return;    }        // Output eigenvalues to left outlet.    t_atom *eigvals_list = (t_atom *)sysmem_newptr(n * sizeof(t_atom));    for (long i = 0; i < n; i++) {        atom_setfloat(eigvals_list + i, w[i]);    }    outlet_list(x->out_eigenvalues, gensym("list"), n, eigvals_list);    sysmem_freeptr(eigvals_list);        // Output eigenvectors preserving column-major format from LAPACK    t_atom *eigvecs_list = (t_atom *)sysmem_newptr(2 * total * sizeof(t_atom));    for (long j = 0; j < n; j++) {  // j is column index (eigenvector index)        for (long i = 0; i < n; i++) {  // i is row index within the eigenvector            // Column-major indexing for A: element (i,j) is at index j*n + i            __CLPK_doublecomplex z = A[j*n + i];            // Keep the same column-major order in the output            long idx = 2 * (j*n + i);            atom_setfloat(eigvecs_list + idx, z.r);            atom_setfloat(eigvecs_list + idx + 1, z.i);        }    }    outlet_list(x->out_eigenvectors, gensym("list"), 2 * total, eigvecs_list);    sysmem_freeptr(eigvecs_list);        free(A);    free(w);        object_post((t_object *)x, "Eigen-decomposition completed successfully.");}
+/*     qte.eigencalc.c – Complex Eigen-decomposition for Max/MSP
+     (Computes eigenvalues & eigenvectors of a complex Hermitian matrix using LAPACK)
+    
+     The external:
+       - Is instantiated with a dimension [qte.eigencalc n].
+       - Expects a plain list message of 2*n*n floats (row-major order; each element is represented as real, imag).
+       - On bang, converts the matrix to column-major, computes eigenvalues/eigenvectors,
+         and outputs:
+           Left outlet: n real eigenvalues.
+           Right outlet: 2*n*n floats for eigenvectors (each eigenvector is a column with interleaved real, imag).
+*/
+
+#include "ext.h"
+#include "ext_obex.h"
+// Include both clapack.h for LAPACK function declarations
+#include <Accelerate/Accelerate.h>
+#include <math.h>
+#include <stdlib.h>
+
+// Object structure
+typedef struct _qte_eigencalc {
+    t_object ob;
+    long n;   // Matrix dimension
+    // Stored complex matrix, in row-major order.
+    // Expected input is 2*n*n floats, interpreted as n*n complex numbers.
+    __CLPK_doublecomplex *matrix;
+    // Two outlets: left for eigenvalues, right for eigenvectors.
+    void *out_eigenvalues;
+    void *out_eigenvectors;
+} t_qte_eigencalc;
+
+static t_class *qte_eigencalc_class = NULL;
+
+/* Function prototypes */
+void ext_main(void *r);
+void *qte_eigencalc_new(t_symbol *s, long argc, t_atom *argv);
+void  qte_eigencalc_free(t_qte_eigencalc *x);
+void  qte_eigencalc_assist(t_qte_eigencalc *x, void *b, long m, long a, char *s);
+void  qte_eigencalc_list(t_qte_eigencalc *x, t_symbol *s, long argc, t_atom *argv);
+void  qte_eigencalc_bang(t_qte_eigencalc *x);
+
+/* ----------------------------------------------------------------------------
+   ext_main – class initialization
+---------------------------------------------------------------------------- */
+void ext_main(void *r) {
+    t_class *c = class_new("qte.eigencalc",
+                           (method)qte_eigencalc_new,
+                           (method)qte_eigencalc_free,
+                           sizeof(t_qte_eigencalc),
+                           0L, A_GIMME, 0);
+                            
+    class_addmethod(c, (method)qte_eigencalc_assist, "assist", A_CANT, 0);
+    // Register the "list" method to accept a plain list message with 2*n*n floats.
+    class_addmethod(c, (method)qte_eigencalc_list, "list", A_GIMME, 0);
+    // "bang" triggers the eigen-decomposition.
+    class_addmethod(c, (method)qte_eigencalc_bang, "bang", 0);
+    
+    class_register(CLASS_BOX, c);
+    qte_eigencalc_class = c;
+}
+
+/* ----------------------------------------------------------------------------
+   Constructor
+---------------------------------------------------------------------------- */
+void *qte_eigencalc_new(t_symbol *s, long argc, t_atom *argv) {
+    t_qte_eigencalc *x = (t_qte_eigencalc *)object_alloc(qte_eigencalc_class);
+    if (x) {
+        // Default dimension is 3.
+        x->n = 3;
+        if (argc >= 1) {
+            long tmp = atom_getlong(argv);
+            if (tmp > 0)
+                x->n = tmp;
+        }
+        x->matrix = NULL;
+        // Create two outlets: left for eigenvalues, right for eigenvectors.
+        x->out_eigenvalues = outlet_new((t_object *)x, NULL);
+        x->out_eigenvectors = outlet_new((t_object *)x, NULL);
+    }
+    return (x);
+}
+
+/* ----------------------------------------------------------------------------
+   Destructor
+---------------------------------------------------------------------------- */
+void qte_eigencalc_free(t_qte_eigencalc *x) {
+    if (x->matrix)
+        free(x->matrix);
+}
+
+/* ----------------------------------------------------------------------------
+   Assist method
+---------------------------------------------------------------------------- */
+void qte_eigencalc_assist(t_qte_eigencalc *x, void *b, long m, long a, char *s) {
+    if (m == 1)
+        sprintf(s, "Input: list of %ld floats (2*n*n, row-major complex matrix), then bang", 2 * x->n * x->n);
+    else {
+        if (a == 0)
+            sprintf(s, "Left outlet: %ld eigenvalues (real)", x->n);
+        else
+            sprintf(s, "Right outlet: %ld eigenvectors (column-major, each as (real, imag) pair)", x->n * x->n);
+    }
+}
+
+/* ----------------------------------------------------------------------------
+   qte_eigencalc_list – stores the input complex matrix from a list message.
+   Expects 2*n*n floats (row-major order; each pair = real, imag).
+---------------------------------------------------------------------------- */
+void qte_eigencalc_list(t_qte_eigencalc *x, t_symbol *s, long argc, t_atom *argv) {
+    long n = x->n;
+    long total = 2 * n * n;
+    if (argc != total) {
+        object_error((t_object *)x, "Expected %ld floats for complex matrix, got %ld", total, argc);
+        return;
+    }
+    if (x->matrix)
+        free(x->matrix);
+    x->matrix = (__CLPK_doublecomplex *)malloc(n * n * sizeof(__CLPK_doublecomplex));
+    if (!x->matrix) {
+        object_error((t_object *)x, "Memory allocation failed for matrix storage.");
+        return;
+    }
+    for (long i = 0; i < n * n; i++) {
+        double re = atom_getfloat(argv + (2 * i));
+        double im = atom_getfloat(argv + (2 * i + 1));
+        __CLPK_doublecomplex z;
+        z.r = re;
+        z.i = im;
+        x->matrix[i] = z;
+    }
+    object_post((t_object *)x, "Complex matrix stored (dimension %ld).", n);
+}
+
+/* ----------------------------------------------------------------------------
+   qte_eigencalc_bang – performs the eigen-decomposition using LAPACK
+---------------------------------------------------------------------------- */
+void qte_eigencalc_bang(t_qte_eigencalc *x) {
+    if (!x->matrix) {
+        object_error((t_object *)x, "No matrix stored. Use a list message first.");
+        return;
+    }
+    long n = x->n;
+    __CLPK_integer N = (__CLPK_integer)n;
+    __CLPK_integer total = N * N;
+    
+    // Convert the stored row-major matrix to column-major order (for LAPACK).
+    __CLPK_doublecomplex *A = (__CLPK_doublecomplex *)malloc(total * sizeof(__CLPK_doublecomplex));
+    if (!A) {
+        object_error((t_object *)x, "Memory allocation failed for LAPACK matrix.");
+        return;
+    }
+    for (long i = 0; i < n; i++) {
+        for (long j = 0; j < n; j++) {
+            // Row-major index: i*n + j, column-major index: j*n + i.
+            A[j*n + i] = x->matrix[i*n + j];
+        }
+    }
+    
+    // Allocate eigenvalue array
+    __CLPK_doublereal *w = (__CLPK_doublereal *)malloc(n * sizeof(__CLPK_doublereal));
+    if (!w) {
+        object_error((t_object *)x, "Memory allocation failed for eigenvalues.");
+        free(A);
+        return;
+    }
+    
+    // Set up parameters for zheev_ (using original LAPACK naming with underscore)
+    char jobz = 'V'; // compute eigenvectors
+    char uplo = 'U'; // matrix is stored in the upper triangle
+    __CLPK_integer LDA = N, info;
+    
+    // Workspace query to determine optimal lwork size
+    __CLPK_integer lwork = -1;
+    __CLPK_doublecomplex work_query;
+    __CLPK_integer rwork_dim = 3*N - 2;
+    __CLPK_doublereal *rwork = (__CLPK_doublereal *)malloc(rwork_dim * sizeof(__CLPK_doublereal));
+    if (!rwork) {
+        object_error((t_object *)x, "Memory allocation failed for rwork.");
+        free(A); free(w);
+        return;
+    }
+    
+    // Use the function with trailing underscore - this is the actual function name in Apple's implementation
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    zheev_(&jobz, &uplo, &N, A, &LDA, w, &work_query, &lwork, rwork, &info);
+    #pragma clang diagnostic pop
+    
+    if (info != 0) {
+        object_error((t_object *)x, "zheev_ workspace query error: info=%d", info);
+        free(A); free(w); free(rwork);
+        return;
+    }
+    lwork = (__CLPK_integer)(work_query.r);
+    __CLPK_doublecomplex *work = (__CLPK_doublecomplex *)malloc(lwork * sizeof(__CLPK_doublecomplex));
+    if (!work) {
+        object_error((t_object *)x, "Memory allocation failed for work.");
+        free(A); free(w); free(rwork);
+        return;
+    }
+    
+    // Actual eigen-decomposition call using the LAPACK function with underscore
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    zheev_(&jobz, &uplo, &N, A, &LDA, w, work, &lwork, rwork, &info);
+    #pragma clang diagnostic pop
+    
+    free(work);
+    free(rwork);
+    if (info != 0) {
+        object_error((t_object *)x, "Eigen-decomposition failed: info=%d", info);
+        free(A); free(w);
+        return;
+    }
+    
+    // Output eigenvalues to left outlet.
+    t_atom *eigvals_list = (t_atom *)sysmem_newptr(n * sizeof(t_atom));
+    for (long i = 0; i < n; i++) {
+        atom_setfloat(eigvals_list + i, w[i]);
+    }
+    outlet_list(x->out_eigenvalues, gensym("list"), n, eigvals_list);
+    sysmem_freeptr(eigvals_list);
+    
+    // Output eigenvectors preserving column-major format from LAPACK
+    t_atom *eigvecs_list = (t_atom *)sysmem_newptr(2 * total * sizeof(t_atom));
+    for (long j = 0; j < n; j++) {  // j is column index (eigenvector index)
+        for (long i = 0; i < n; i++) {  // i is row index within the eigenvector
+            // Column-major indexing for A: element (i,j) is at index j*n + i
+            __CLPK_doublecomplex z = A[j*n + i];
+            // Keep the same column-major order in the output
+            long idx = 2 * (j*n + i);
+            atom_setfloat(eigvecs_list + idx, z.r);
+            atom_setfloat(eigvecs_list + idx + 1, z.i);
+        }
+    }
+    outlet_list(x->out_eigenvectors, gensym("list"), 2 * total, eigvecs_list);
+    sysmem_freeptr(eigvecs_list);
+    
+    free(A);
+    free(w);
+    
+    object_post((t_object *)x, "Eigen-decomposition completed successfully.");
+}
+     (Computes eigenvalues & eigenvectors of a complex Hermitian matrix using LAPACK)         The external:       - Is instantiated with a dimension [qte.eigencalc n].       - Expects a plain list message of 2*n*n floats (row-major order; each element is represented as real, imag).       - On bang, converts the matrix to column-major, computes eigenvalues/eigenvectors,         and outputs:           Left outlet: n real eigenvalues.           Right outlet: 2*n*n floats for eigenvectors (each eigenvector is a column with interleaved real, imag).*/#include "ext.h"#include "ext_obex.h"// Include both clapack.h for LAPACK function declarations#include <Accelerate/Accelerate.h>#include <math.h>#include <stdlib.h>// Object structuretypedef struct _qte_eigencalc {    t_object ob;    long n;   // Matrix dimension    // Stored complex matrix, in row-major order.    // Expected input is 2*n*n floats, interpreted as n*n complex numbers.    __CLPK_doublecomplex *matrix;    // Two outlets: left for eigenvalues, right for eigenvectors.    void *out_eigenvalues;    void *out_eigenvectors;} t_qte_eigencalc;static t_class *qte_eigencalc_class = NULL;/* Function prototypes */void ext_main(void *r);void *qte_eigencalc_new(t_symbol *s, long argc, t_atom *argv);void  qte_eigencalc_free(t_qte_eigencalc *x);void  qte_eigencalc_assist(t_qte_eigencalc *x, void *b, long m, long a, char *s);void  qte_eigencalc_list(t_qte_eigencalc *x, t_symbol *s, long argc, t_atom *argv);void  qte_eigencalc_bang(t_qte_eigencalc *x);/* ----------------------------------------------------------------------------   ext_main – class initialization---------------------------------------------------------------------------- */void ext_main(void *r) {    t_class *c = class_new("qte.eigencalc",                           (method)qte_eigencalc_new,                           (method)qte_eigencalc_free,                           sizeof(t_qte_eigencalc),                           0L, A_GIMME, 0);                                class_addmethod(c, (method)qte_eigencalc_assist, "assist", A_CANT, 0);    // Register the "list" method to accept a plain list message with 2*n*n floats.    class_addmethod(c, (method)qte_eigencalc_list, "list", A_GIMME, 0);    // "bang" triggers the eigen-decomposition.    class_addmethod(c, (method)qte_eigencalc_bang, "bang", 0);        class_register(CLASS_BOX, c);    qte_eigencalc_class = c;}/* ----------------------------------------------------------------------------   Constructor---------------------------------------------------------------------------- */void *qte_eigencalc_new(t_symbol *s, long argc, t_atom *argv) {    t_qte_eigencalc *x = (t_qte_eigencalc *)object_alloc(qte_eigencalc_class);    if (x) {        // Default dimension is 3.        x->n = 3;        if (argc >= 1) {            long tmp = atom_getlong(argv);            if (tmp > 0)                x->n = tmp;        }        x->matrix = NULL;        // Create two outlets: left for eigenvalues, right for eigenvectors.        x->out_eigenvalues = outlet_new((t_object *)x, NULL);        x->out_eigenvectors = outlet_new((t_object *)x, NULL);    }    return (x);}/* ----------------------------------------------------------------------------   Destructor---------------------------------------------------------------------------- */void qte_eigencalc_free(t_qte_eigencalc *x) {    if (x->matrix)        free(x->matrix);}/* ----------------------------------------------------------------------------   Assist method---------------------------------------------------------------------------- */void qte_eigencalc_assist(t_qte_eigencalc *x, void *b, long m, long a, char *s) {    if (m == 1)        sprintf(s, "Input: list of %ld floats (2*n*n, row-major complex matrix), then bang", 2 * x->n * x->n);    else {        if (a == 0)            sprintf(s, "Left outlet: %ld eigenvalues (real)", x->n);        else            sprintf(s, "Right outlet: %ld eigenvectors (column-major, each as (real, imag) pair)", x->n * x->n);    }}/* ----------------------------------------------------------------------------   qte_eigencalc_list – stores the input complex matrix from a list message.   Expects 2*n*n floats (row-major order; each pair = real, imag).---------------------------------------------------------------------------- */void qte_eigencalc_list(t_qte_eigencalc *x, t_symbol *s, long argc, t_atom *argv) {    long n = x->n;    long total = 2 * n * n;    if (argc != total) {        object_error((t_object *)x, "Expected %ld floats for complex matrix, got %ld", total, argc);        return;    }    if (x->matrix)        free(x->matrix);    x->matrix = (__CLPK_doublecomplex *)malloc(n * n * sizeof(__CLPK_doublecomplex));    if (!x->matrix) {        object_error((t_object *)x, "Memory allocation failed for matrix storage.");        return;    }    for (long i = 0; i < n * n; i++) {        double re = atom_getfloat(argv + (2 * i));        double im = atom_getfloat(argv + (2 * i + 1));        __CLPK_doublecomplex z;        z.r = re;        z.i = im;        x->matrix[i] = z;    }    object_post((t_object *)x, "Complex matrix stored (dimension %ld).", n);}/* ----------------------------------------------------------------------------   qte_eigencalc_bang – performs the eigen-decomposition using LAPACK---------------------------------------------------------------------------- */void qte_eigencalc_bang(t_qte_eigencalc *x) {    if (!x->matrix) {        object_error((t_object *)x, "No matrix stored. Use a list message first.");        return;    }    long n = x->n;    __CLPK_integer N = (__CLPK_integer)n;    __CLPK_integer total = N * N;        // Convert the stored row-major matrix to column-major order (for LAPACK).    __CLPK_doublecomplex *A = (__CLPK_doublecomplex *)malloc(total * sizeof(__CLPK_doublecomplex));    if (!A) {        object_error((t_object *)x, "Memory allocation failed for LAPACK matrix.");        return;    }    for (long i = 0; i < n; i++) {        for (long j = 0; j < n; j++) {            // Row-major index: i*n + j, column-major index: j*n + i.            A[j*n + i] = x->matrix[i*n + j];        }    }        // Allocate eigenvalue array    __CLPK_doublereal *w = (__CLPK_doublereal *)malloc(n * sizeof(__CLPK_doublereal));    if (!w) {        object_error((t_object *)x, "Memory allocation failed for eigenvalues.");        free(A);        return;    }        // Set up parameters for zheev_ (using original LAPACK naming with underscore)    char jobz = 'V'; // compute eigenvectors    char uplo = 'U'; // matrix is stored in the upper triangle    __CLPK_integer LDA = N, info;        // Workspace query to determine optimal lwork size    __CLPK_integer lwork = -1;    __CLPK_doublecomplex work_query;    __CLPK_integer rwork_dim = 3*N - 2;    __CLPK_doublereal *rwork = (__CLPK_doublereal *)malloc(rwork_dim * sizeof(__CLPK_doublereal));    if (!rwork) {        object_error((t_object *)x, "Memory allocation failed for rwork.");        free(A); free(w);        return;    }        // Use the function with trailing underscore - this is the actual function name in Apple's implementation    #pragma clang diagnostic push    #pragma clang diagnostic ignored "-Wdeprecated-declarations"    zheev_(&jobz, &uplo, &N, A, &LDA, w, &work_query, &lwork, rwork, &info);    #pragma clang diagnostic pop        if (info != 0) {        object_error((t_object *)x, "zheev_ workspace query error: info=%d", info);        free(A); free(w); free(rwork);        return;    }    lwork = (__CLPK_integer)(work_query.r);    __CLPK_doublecomplex *work = (__CLPK_doublecomplex *)malloc(lwork * sizeof(__CLPK_doublecomplex));    if (!work) {        object_error((t_object *)x, "Memory allocation failed for work.");        free(A); free(w); free(rwork);        return;    }        // Actual eigen-decomposition call using the LAPACK function with underscore    #pragma clang diagnostic push    #pragma clang diagnostic ignored "-Wdeprecated-declarations"    zheev_(&jobz, &uplo, &N, A, &LDA, w, work, &lwork, rwork, &info);    #pragma clang diagnostic pop        free(work);    free(rwork);    if (info != 0) {        object_error((t_object *)x, "Eigen-decomposition failed: info=%d", info);        free(A); free(w);        return;    }        // Output eigenvalues to left outlet.    t_atom *eigvals_list = (t_atom *)sysmem_newptr(n * sizeof(t_atom));    for (long i = 0; i < n; i++) {        atom_setfloat(eigvals_list + i, w[i]);    }    outlet_list(x->out_eigenvalues, gensym("list"), n, eigvals_list);    sysmem_freeptr(eigvals_list);        // Output eigenvectors preserving column-major format from LAPACK    t_atom *eigvecs_list = (t_atom *)sysmem_newptr(2 * total * sizeof(t_atom));    for (long j = 0; j < n; j++) {  // j is column index (eigenvector index)        for (long i = 0; i < n; i++) {  // i is row index within the eigenvector            // Column-major indexing for A: element (i,j) is at index j*n + i            __CLPK_doublecomplex z = A[j*n + i];            // Keep the same column-major order in the output            long idx = 2 * (j*n + i);            atom_setfloat(eigvecs_list + idx, z.r);            atom_setfloat(eigvecs_list + idx + 1, z.i);        }    }    outlet_list(x->out_eigenvectors, gensym("list"), 2 * total, eigvecs_list);    sysmem_freeptr(eigvecs_list);        free(A);    free(w);        object_post((t_object *)x, "Eigen-decomposition completed successfully.");}
