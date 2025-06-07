@@ -1,0 +1,8 @@
+{
+    "name": "QTE",
+    "description": "Quantum Time Evolution externals for Max/MSP",
+    "version": "1.0.0",
+    "author": "Pedro González Fernández",
+    "tags": ["quantum", "time", "evolution"],
+    "website": "https://github.com/pgonzalez/QTE"
+}

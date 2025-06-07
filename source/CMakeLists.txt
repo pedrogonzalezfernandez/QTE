@@ -14,16 +14,17 @@ set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64")
 # Set the build directory explicitly
 set(CMAKE_BINARY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build")
 
-# Force all paths to be within the project
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
-set(MAX_INSTALL_DIR "${CMAKE_BINARY_DIR}")
-set(MAX_BUILD_DIR "${CMAKE_BINARY_DIR}")
+# Output compiled externals to the package "externals" folder
+set(EXTERNALS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../externals")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${EXTERNALS_DIR}")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${EXTERNALS_DIR}")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${EXTERNALS_DIR}")
+set(MAX_INSTALL_DIR "${EXTERNALS_DIR}")
+set(MAX_BUILD_DIR "${EXTERNALS_DIR}")
 
 # Override environment variables that might be used by scripts
-set(ENV{MAX_BUILD_DIR} "${CMAKE_BINARY_DIR}")
-set(ENV{MAX_INSTALL_DIR} "${CMAKE_BINARY_DIR}")
+set(ENV{MAX_BUILD_DIR} "${EXTERNALS_DIR}")
+set(ENV{MAX_INSTALL_DIR} "${EXTERNALS_DIR}")
 
 # Override any default paths that might be causing issues
 set(ZERO_CHECK_SOURCE_DIR "${CMAKE_BINARY_DIR}")
