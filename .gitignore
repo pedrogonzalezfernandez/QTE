@@ -1,0 +1,11 @@
+# Build artifacts
+build/
+*.mxo
+*.mxe
+*.mxe64
+*.o
+*.obj
+*.exp
+*.lib
+*.pdb
+.DS_Store

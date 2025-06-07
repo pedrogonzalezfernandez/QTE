@@ -1,0 +1,207 @@
+#include "ext.h"
+#include "ext_obex.h"
+#include <stdlib.h>
+#include <time.h>
+#include <math.h>
+
+// qte.randherm: Random Hermitian Matrix Generator with complex off–diagonals.
+// Usage: Instantiate with [qte.randherm] (defaults: 3, re: [0,1], im: [0,0]).
+// You can send messages:
+//    dim <n>             to set the matrix dimension,
+//    re_range <min> <max> to set the real range,
+//    im_range <min> <max> to set the imaginary range,
+// and then bang to generate the matrix.
+typedef struct _qte_randherm {
+    t_object ob;
+    long n;           // Matrix dimension.
+    double re_min;    // Real part minimum.
+    double re_max;    // Real part maximum.
+    double im_min;    // Imaginary part minimum.
+    double im_max;    // Imaginary part maximum.
+    void *out;        // Outlet pointer.
+} t_qte_randherm;
+
+static t_class *qte_randherm_class = NULL;
+
+/* Function prototypes */
+void ext_main(void *r);
+void *qte_randherm_new(t_symbol *s, long argc, t_atom *argv);
+void qte_randherm_free(t_qte_randherm *x);
+void qte_randherm_assist(t_qte_randherm *x, void *b, long m, long a, char *s);
+void qte_randherm_bang(t_qte_randherm *x);
+
+void qte_randherm_dim(t_qte_randherm *x, long n);
+void qte_randherm_re_range(t_qte_randherm *x, double re_min, double re_max);
+void qte_randherm_im_range(t_qte_randherm *x, double im_min, double im_max);
+
+// Utility: generate a random double in the range [minv, maxv].
+static double rand_in_range(double minv, double maxv)
+{
+    double r = (double)rand() / (double)RAND_MAX;
+    return minv + r * (maxv - minv);
+}
+
+/* ---------------------------------------------------------------------------
+   ext_main – class initialization
+---------------------------------------------------------------------------- */
+void ext_main(void *r)
+{
+    t_class *c = class_new("qte.randherm",
+                           (method)qte_randherm_new,
+                           (method)qte_randherm_free,
+                           sizeof(t_qte_randherm),
+                           0L, A_GIMME, 0);
+    
+    class_addmethod(c, (method)qte_randherm_assist, "assist", A_CANT, 0);
+    class_addmethod(c, (method)qte_randherm_bang, "bang", 0);
+    class_addmethod(c, (method)qte_randherm_dim, "dim", A_LONG, 0);
+    class_addmethod(c, (method)qte_randherm_re_range, "re_range", A_FLOAT, A_FLOAT, 0);
+    class_addmethod(c, (method)qte_randherm_im_range, "im_range", A_FLOAT, A_FLOAT, 0);
+    
+    class_register(CLASS_BOX, c);
+    qte_randherm_class = c;
+    
+    // Seed the random number generator
+    srand((unsigned int)time(NULL));
+}
+
+/* ---------------------------------------------------------------------------
+   Constructor
+---------------------------------------------------------------------------- */
+void *qte_randherm_new(t_symbol *s, long argc, t_atom *argv)
+{
+    t_qte_randherm *x = (t_qte_randherm *)object_alloc(qte_randherm_class);
+    if (x) {
+        // Default parameters
+        x->n = 3;
+        x->re_min = 0.0;
+        x->re_max = 1.0;
+        x->im_min = 0.0;
+        x->im_max = 0.0;
+        
+        // Optionally, use instantiation arguments
+        if (argc >= 1) {
+            long tmp = atom_getlong(argv);
+            if (tmp > 0)
+                x->n = tmp;
+        }
+        if (argc >= 2)
+            x->re_min = atom_getfloat(argv+1);
+        if (argc >= 3)
+            x->re_max = atom_getfloat(argv+2);
+        if (argc >= 4)
+            x->im_min = atom_getfloat(argv+3);
+        if (argc >= 5)
+            x->im_max = atom_getfloat(argv+4);
+        
+        x->out = outlet_new((t_object *)x, NULL);
+    }
+    return x;
+}
+
+/* ---------------------------------------------------------------------------
+   Destructor
+---------------------------------------------------------------------------- */
+void qte_randherm_free(t_qte_randherm *x)
+{
+    // No dynamic memory allocated in the structure.
+}
+
+/* ---------------------------------------------------------------------------
+   Assist method
+---------------------------------------------------------------------------- */
+void qte_randherm_assist(t_qte_randherm *x, void *b, long m, long a, char *s)
+{
+    if (m == 1)
+        sprintf(s, "Bang to generate random Hermitian matrix; messages: 'dim', 're_range', 'im_range'");
+    else
+        sprintf(s, "Outputs 2*n*n floats: row-major order, each element as (real, imag)");
+}
+
+/* ---------------------------------------------------------------------------
+   Message: dim <n> – sets the matrix dimension.
+---------------------------------------------------------------------------- */
+void qte_randherm_dim(t_qte_randherm *x, long n)
+{
+    if (n > 0) {
+        x->n = n;
+        object_post((t_object *)x, "Dimension set to %ld", n);
+    } else {
+        object_error((t_object *)x, "Dimension must be greater than 0");
+    }
+}
+
+/* ---------------------------------------------------------------------------
+   Message: re_range <min> <max> – sets the real part range.
+---------------------------------------------------------------------------- */
+void qte_randherm_re_range(t_qte_randherm *x, double re_min, double re_max)
+{
+    x->re_min = re_min;
+    x->re_max = re_max;
+    object_post((t_object *)x, "Real range set to [%g, %g]", re_min, re_max);
+}
+
+/* ---------------------------------------------------------------------------
+   Message: im_range <min> <max> – sets the imaginary part range.
+---------------------------------------------------------------------------- */
+void qte_randherm_im_range(t_qte_randherm *x, double im_min, double im_max)
+{
+    x->im_min = im_min;
+    x->im_max = im_max;
+    object_post((t_object *)x, "Imaginary range set to [%g, %g]", im_min, im_max);
+}
+
+/* ---------------------------------------------------------------------------
+   Bang method: Generate a random Hermitian matrix with complex off-diagonals.
+   The output is a flat list of 2*n*n floats in row-major order.
+---------------------------------------------------------------------------- */
+void qte_randherm_bang(t_qte_randherm *x)
+{
+    long n = x->n;
+    long total = 2 * n * n;
+    float *out_data = (float *)sysmem_newptr(total * sizeof(float));
+
+    // Initialize matrix to zeros
+    for (long i = 0; i < n; i++) {
+        for (long j = 0; j < n; j++) {
+            long idx = 2 * (i * n + j);
+            out_data[idx] = 0.0f;
+            out_data[idx+1] = 0.0f;
+        }
+    }
+
+    // Fill diagonal with random real values; imaginary part is zero.
+    for (long i = 0; i < n; i++) {
+        long idx = 2 * (i * n + i);
+        float re = (float)rand_in_range(x->re_min, x->re_max);
+        out_data[idx] = re;
+        out_data[idx+1] = 0.f;
+    }
+
+    // Fill upper triangle (i < j) with random complex numbers, and set lower triangle as their conjugate.
+    for (long i = 0; i < n; i++) {
+        for (long j = i + 1; j < n; j++) {
+            long idx_ij = 2 * (i * n + j);
+            float re = (float)rand_in_range(x->re_min, x->re_max);
+            float im = (float)rand_in_range(x->im_min, x->im_max);
+            out_data[idx_ij] = re;
+            out_data[idx_ij+1] = im;
+            // Lower triangle: conjugate.
+            long idx_ji = 2 * (j * n + i);
+            out_data[idx_ji] = re;
+            out_data[idx_ji+1] = -im;
+        }
+    }
+
+    // Output the generated matrix as a flat list.
+    t_atom *out_list = (t_atom *)sysmem_newptr(total * sizeof(t_atom));
+    for (long k = 0; k < total; k++) {
+        atom_setfloat(out_list + k, out_data[k]);
+    }
+    outlet_list(x->out, gensym("list"), total, out_list);
+
+    sysmem_freeptr(out_list);
+    sysmem_freeptr(out_data);
+}
+
+#include "ext_obex.h"#include <stdlib.h>#include <time.h>#include <math.h>// qte.randherm: Random Hermitian Matrix Generator with complex off–diagonals.// Usage: Instantiate with [qte.randherm] (defaults: 3, re: [0,1], im: [0,0]).// You can send messages://    dim <n>             to set the matrix dimension,//    re_range <min> <max> to set the real range,//    im_range <min> <max> to set the imaginary range,// and then bang to generate the matrix.typedef struct _qte_randherm {    t_object ob;    long n;           // Matrix dimension.    double re_min;    // Real part minimum.    double re_max;    // Real part maximum.    double im_min;    // Imaginary part minimum.    double im_max;    // Imaginary part maximum.    void *out;        // Outlet pointer.} t_qte_randherm;static t_class *qte_randherm_class = NULL;/* Function prototypes */void ext_main(void *r);void *qte_randherm_new(t_symbol *s, long argc, t_atom *argv);void qte_randherm_free(t_qte_randherm *x);void qte_randherm_assist(t_qte_randherm *x, void *b, long m, long a, char *s);void qte_randherm_bang(t_qte_randherm *x);void qte_randherm_dim(t_qte_randherm *x, long n);void qte_randherm_re_range(t_qte_randherm *x, double re_min, double re_max);void qte_randherm_im_range(t_qte_randherm *x, double im_min, double im_max);// Utility: generate a random double in the range [minv, maxv].static double rand_in_range(double minv, double maxv){    double r = (double)rand() / (double)RAND_MAX;    return minv + r * (maxv - minv);}/* ---------------------------------------------------------------------------   ext_main – class initialization---------------------------------------------------------------------------- */void ext_main(void *r){    t_class *c = class_new("qte.randherm",                           (method)qte_randherm_new,                           (method)qte_randherm_free,                           sizeof(t_qte_randherm),                           0L, A_GIMME, 0);        class_addmethod(c, (method)qte_randherm_assist, "assist", A_CANT, 0);    class_addmethod(c, (method)qte_randherm_bang, "bang", 0);    class_addmethod(c, (method)qte_randherm_dim, "dim", A_LONG, 0);    class_addmethod(c, (method)qte_randherm_re_range, "re_range", A_FLOAT, A_FLOAT, 0);    class_addmethod(c, (method)qte_randherm_im_range, "im_range", A_FLOAT, A_FLOAT, 0);        class_register(CLASS_BOX, c);    qte_randherm_class = c;        // Seed the random number generator    srand((unsigned int)time(NULL));}/* ---------------------------------------------------------------------------   Constructor---------------------------------------------------------------------------- */void *qte_randherm_new(t_symbol *s, long argc, t_atom *argv){    t_qte_randherm *x = (t_qte_randherm *)object_alloc(qte_randherm_class);    if (x) {        // Default parameters        x->n = 3;        x->re_min = 0.0;        x->re_max = 1.0;        x->im_min = 0.0;        x->im_max = 0.0;                // Optionally, use instantiation arguments        if (argc >= 1) {            long tmp = atom_getlong(argv);            if (tmp > 0)                x->n = tmp;        }        if (argc >= 2)            x->re_min = atom_getfloat(argv+1);        if (argc >= 3)            x->re_max = atom_getfloat(argv+2);        if (argc >= 4)            x->im_min = atom_getfloat(argv+3);        if (argc >= 5)            x->im_max = atom_getfloat(argv+4);                x->out = outlet_new((t_object *)x, NULL);    }    return x;}/* ---------------------------------------------------------------------------   Destructor---------------------------------------------------------------------------- */void qte_randherm_free(t_qte_randherm *x){    // No dynamic memory allocated in the structure.}/* ---------------------------------------------------------------------------   Assist method---------------------------------------------------------------------------- */void qte_randherm_assist(t_qte_randherm *x, void *b, long m, long a, char *s){    if (m == 1)        sprintf(s, "Bang to generate random Hermitian matrix; messages: 'dim', 're_range', 'im_range'");    else        sprintf(s, "Outputs 2*n*n floats: row-major order, each element as (real, imag)");}/* ---------------------------------------------------------------------------   Message: dim <n> – sets the matrix dimension.---------------------------------------------------------------------------- */void qte_randherm_dim(t_qte_randherm *x, long n){    if (n > 0) {        x->n = n;        object_post((t_object *)x, "Dimension set to %ld", n);    } else {        object_error((t_object *)x, "Dimension must be greater than 0");    }}/* ---------------------------------------------------------------------------   Message: re_range <min> <max> – sets the real part range.---------------------------------------------------------------------------- */void qte_randherm_re_range(t_qte_randherm *x, double re_min, double re_max){    x->re_min = re_min;    x->re_max = re_max;    object_post((t_object *)x, "Real range set to [%g, %g]", re_min, re_max);}/* ---------------------------------------------------------------------------   Message: im_range <min> <max> – sets the imaginary part range.---------------------------------------------------------------------------- */void qte_randherm_im_range(t_qte_randherm *x, double im_min, double im_max){    x->im_min = im_min;    x->im_max = im_max;    object_post((t_object *)x, "Imaginary range set to [%g, %g]", im_min, im_max);}/* ---------------------------------------------------------------------------   Bang method: Generate a random Hermitian matrix with complex off-diagonals.   The output is a flat list of 2*n*n floats in row-major order.---------------------------------------------------------------------------- */void qte_randherm_bang(t_qte_randherm *x){    long n = x->n;    long total = 2 * n * n;    float *out_data = (float *)sysmem_newptr(total * sizeof(float));    // Initialize matrix to zeros    for (long i = 0; i < n; i++) {        for (long j = 0; j < n; j++) {            long idx = 2 * (i * n + j);            out_data[idx] = 0.0f;            out_data[idx+1] = 0.0f;        }    }    // Fill diagonal with random real values; imaginary part is zero.    for (long i = 0; i < n; i++) {        long idx = 2 * (i * n + i);        float re = (float)rand_in_range(x->re_min, x->re_max);        out_data[idx] = re;        out_data[idx+1] = 0.f;    }    // Fill upper triangle (i < j) with random complex numbers, and set lower triangle as their conjugate.    for (long i = 0; i < n; i++) {        for (long j = i + 1; j < n; j++) {            long idx_ij = 2 * (i * n + j);            float re = (float)rand_in_range(x->re_min, x->re_max);            float im = (float)rand_in_range(x->im_min, x->im_max);            out_data[idx_ij] = re;            out_data[idx_ij+1] = im;            // Lower triangle: conjugate.            long idx_ji = 2 * (j * n + i);            out_data[idx_ji] = re;            out_data[idx_ji+1] = -im;        }    }    // Output the generated matrix as a flat list.    t_atom *out_list = (t_atom *)sysmem_newptr(total * sizeof(t_atom));    for (long k = 0; k < total; k++) {        atom_setfloat(out_list + k, out_data[k]);    }    outlet_list(x->out, gensym("list"), total, out_list);    sysmem_freeptr(out_list);    sysmem_freeptr(out_data);}
