@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 3.10)
 
 # Set policies first to avoid warnings
-cmake_policy(SET CMP0156 NEW)  # Use modern library de-duplication
+if(POLICY CMP0156)
+    cmake_policy(SET CMP0156 NEW)  # Use modern library de-duplication
+endif()
 
 project(QteExternals C)
 
